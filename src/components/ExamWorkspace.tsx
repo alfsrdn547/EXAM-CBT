@@ -38,8 +38,8 @@ import {
   formatCountdown,
   formatTimeWIB,
   saveAttemptLocally,
-  syncAttemptToServer,
 } from '../utils/storage';
+import { studentExamService } from '../services/examService';
 import { SubmitModal } from './SubmitModal';
 import { ViolationModal } from './ViolationModal';
 import { MathText } from './MathText';
@@ -55,6 +55,17 @@ interface ExamWorkspaceProps {
 
 type FontScale = 'sm' | 'md' | 'lg';
 
+function computeRemainingSecondsFromAttempt(att: ExamAttemptState): number {
+  if (att.serverMustSubmitBefore && typeof att.serverClockOffsetMs === 'number') {
+    const mustSubmitMs = new Date(att.serverMustSubmitBefore).getTime();
+    if (!Number.isNaN(mustSubmitMs)) {
+      const estimatedServerNow = Date.now() + att.serverClockOffsetMs;
+      return Math.max(0, Math.floor((mustSubmitMs - estimatedServerNow) / 1000));
+    }
+  }
+  return Math.max(0, Math.floor((att.mustSubmitBefore - Date.now()) / 1000));
+}
+
 export const ExamWorkspace: React.FC<ExamWorkspaceProps> = ({
   exam,
   questions,
@@ -63,7 +74,7 @@ export const ExamWorkspace: React.FC<ExamWorkspaceProps> = ({
   onCompleteSubmit,
 }) => {
   const [secondsLeft, setSecondsLeft] = useState<number>(() =>
-    Math.max(0, Math.floor((attempt.mustSubmitBefore - Date.now()) / 1000)),
+    computeRemainingSecondsFromAttempt(attempt),
   );
   const [syncStatus, setSyncStatus] = useState<SyncStatus>(() =>
     typeof navigator !== 'undefined' && !navigator.onLine ? 'offline_local' : 'synced',
@@ -138,44 +149,72 @@ export const ExamWorkspace: React.FC<ExamWorkspaceProps> = ({
     }, 2600);
   }, []);
 
-  // Execute server sync safely without overwriting newer local edits
+  // Execute Supabase sync safely without overwriting newer local edits
   const performSync = useCallback(
-    async (targetAttempt?: ExamAttemptState) => {
+    async (
+      targetAttempt?: ExamAttemptState,
+      isFinal = false,
+    ): Promise<{ ok: boolean; score?: number | null }> => {
       const latest = targetAttempt ?? attemptRef.current;
       const mode = simModeRef.current;
 
       if (mode === 'force_offline' || (typeof navigator !== 'undefined' && !navigator.onLine)) {
         setSyncStatus('offline_local');
-        return false;
+        return { ok: false };
+      }
+
+      if (mode === 'force_error') {
+        setSyncStatus('sync_failed');
+        return { ok: false };
       }
 
       setSyncStatus('syncing');
-      const result = await syncAttemptToServer(latest, mode);
+      try {
+        const formattedViolations = latest.violations.map((v) => ({
+          id: v.id,
+          type: v.type,
+          timestamp: v.timestamp,
+          duration_seconds: v.durationSeconds,
+          message: v.message,
+        }));
 
-      if (result.ok && result.syncedAt) {
+        const rpcResult = await studentExamService.syncAnswers(
+          latest.attemptId,
+          latest.answers,
+          formattedViolations,
+          isFinal,
+        );
+
+        const syncedAt = Date.now();
+        const serverScore =
+          rpcResult && typeof rpcResult === 'object' && typeof (rpcResult as any).score === 'number'
+            ? Number((rpcResult as any).score)
+            : attemptRef.current.serverScore ?? null;
+
         setSyncStatus('synced');
         const merged: ExamAttemptState = {
           ...attemptRef.current,
-          lastSyncedAt: result.syncedAt,
+          lastSyncedAt: syncedAt,
           pendingSync: false,
+          serverScore,
         };
         attemptRef.current = merged;
-        void saveAttemptLocally(merged);
+        await saveAttemptLocally(merged);
         onUpdateAttempt(merged);
-        return true;
+        return { ok: true, score: serverScore };
+      } catch {
+        if (typeof navigator !== 'undefined' && !navigator.onLine) {
+          setSyncStatus('offline_local');
+        } else {
+          setSyncStatus('sync_failed');
+        }
+        return { ok: false };
       }
-
-      if (result.reason === 'offline') {
-        setSyncStatus('offline_local');
-      } else {
-        setSyncStatus('sync_failed');
-      }
-      return false;
     },
     [onUpdateAttempt],
   );
 
-  // Final submission handler (manual or timeout) with instant auto-grading
+  // Final submission handler (manual or timeout) with Supabase sync + IndexedDB/LocalStorage fallback
   const finalizeSubmission = useCallback(
     async (reason: 'manual' | 'timeout') => {
       if (isSubmitting) return;
@@ -206,14 +245,16 @@ export const ExamWorkspace: React.FC<ExamWorkspaceProps> = ({
         essayDraftRef.current.dirty = false;
       }
 
-      const gradingSummary = evaluateExamAnswers(
-        exam.questions,
-        latest.answers,
-        exam.passingScore,
-        latest.questionOrder,
-        latest.optionOrders,
-        latest.essayScores,
-      );
+      const gradingSummary = !latest.isSupabaseSession
+        ? evaluateExamAnswers(
+            exam.questions,
+            latest.answers,
+            exam.passingScore,
+            latest.questionOrder,
+            latest.optionOrders,
+            latest.essayScores,
+          )
+        : undefined;
 
       const finalized: ExamAttemptState = {
         ...latest,
@@ -225,7 +266,7 @@ export const ExamWorkspace: React.FC<ExamWorkspaceProps> = ({
 
       attemptRef.current = finalized;
       await saveAttemptLocally(finalized);
-      const synced = await performSync(finalized);
+      const syncOutcome = await performSync(finalized, true);
 
       if (document.fullscreenElement) {
         try {
@@ -241,25 +282,23 @@ export const ExamWorkspace: React.FC<ExamWorkspaceProps> = ({
         submittedAt: now,
         submittedReason: reason,
         gradingSummary,
-        pendingSync: !synced,
+        serverScore: syncOutcome.score ?? attemptRef.current.serverScore ?? null,
+        pendingSync: !syncOutcome.ok,
       };
       await saveAttemptLocally(finalWithSyncState);
 
       setIsSubmitting(false);
       setIsSubmitModalOpen(false);
       setIsQuestionDrawerOpen(false);
-      onCompleteSubmit(finalWithSyncState, synced);
+      onCompleteSubmit(finalWithSyncState, syncOutcome.ok);
     },
     [exam.passingScore, exam.questions, isSubmitting, onCompleteSubmit, performSync],
   );
 
-  // Countdown Timer (1s interval) + Auto-submit when 0
+  // Server-Synced Countdown Timer (1s interval) + Auto-submit when 0
   useEffect(() => {
     const tick = () => {
-      const remaining = Math.max(
-        0,
-        Math.floor((attemptRef.current.mustSubmitBefore - Date.now()) / 1000),
-      );
+      const remaining = computeRemainingSecondsFromAttempt(attemptRef.current);
       setSecondsLeft(remaining);
 
       if (remaining <= 0 && !autoSubmittedRef.current) {
@@ -271,13 +310,13 @@ export const ExamWorkspace: React.FC<ExamWorkspaceProps> = ({
     tick();
     const interval = window.setInterval(tick, 1000);
     return () => window.clearInterval(interval);
-  }, [attempt.mustSubmitBefore, finalizeSubmission]);
+  }, [attempt.mustSubmitBefore, attempt.serverMustSubmitBefore, finalizeSubmission]);
 
-  // Real browser online/offline listeners + background sync with jitter (30-45s)
+  // Real browser online/offline listeners + Background Sync every 30 seconds
   useEffect(() => {
     const handleOnline = () => {
       if (simModeRef.current === 'auto') {
-        void performSync();
+        void performSync(attemptRef.current, false);
       }
     };
 
@@ -290,23 +329,19 @@ export const ExamWorkspace: React.FC<ExamWorkspaceProps> = ({
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
 
-    let timeoutId: number;
-    const scheduleNextJitterSync = () => {
-      const jitterMs = 30000 + Math.floor(Math.random() * 15000); // 30s - 45s
-      timeoutId = window.setTimeout(async () => {
-        if (attemptRef.current.pendingSync || syncStatusRef.current !== 'synced') {
-          await performSync();
-        }
-        scheduleNextJitterSync();
-      }, jitterMs);
-    };
-
-    scheduleNextJitterSync();
+    const backgroundInterval = window.setInterval(() => {
+      if (
+        attemptRef.current.status === 'in_progress' &&
+        (attemptRef.current.pendingSync || syncStatusRef.current !== 'synced')
+      ) {
+        void performSync(attemptRef.current, false);
+      }
+    }, 30000);
 
     return () => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
-      window.clearTimeout(timeoutId);
+      window.clearInterval(backgroundInterval);
     };
   }, [performSync]);
 
@@ -562,9 +597,13 @@ export const ExamWorkspace: React.FC<ExamWorkspaceProps> = ({
   };
 
   const handleSimulateLowTimer = () => {
+    const simulatedMustSubmit = new Date(
+      Date.now() + (attemptRef.current.serverClockOffsetMs ?? 0) + 285 * 1000,
+    ).toISOString();
     const updated: ExamAttemptState = {
       ...attemptRef.current,
       mustSubmitBefore: Date.now() + 285 * 1000, // 4 menit 45 detik
+      serverMustSubmitBefore: simulatedMustSubmit,
     };
     attemptRef.current = updated;
     void saveAttemptLocally(updated);

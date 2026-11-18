@@ -1,7 +1,8 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
   AlignLeft,
+  AlertCircle,
   BarChart3,
   BookOpen,
   Check,
@@ -33,7 +34,6 @@ import {
 } from 'lucide-react';
 import { ExamAttemptState, ExamConfig, QuestionType, StoredQuestion } from '../types/exam';
 import {
-  DEFAULT_EXAM_INSTRUCTIONS,
   countAnsweredQuestions,
   evaluateExamAnswers,
 } from '../data/mockExam';
@@ -41,9 +41,11 @@ import {
   exportMonitoringToCsv,
   fileToDataUrl,
   generateExamToken,
-  getMonitoringAttemptsByExam,
-  upsertMonitoringAttempt,
 } from '../utils/examStore';
+import {
+  mapMonitoringRowsToAttempts,
+  teacherExamService,
+} from '../services/examService';
 import {
   downloadQuestionTemplateCsv,
   downloadQuestionTemplateXlsx,
@@ -63,9 +65,12 @@ import {
 } from './BeritaAcaraPrintView';
 
 interface TeacherDashboardProps {
+  teacherUserId: string;
+  teacherName: string;
   exams: ExamConfig[];
-  onSaveExams: (nextExams: ExamConfig[]) => void;
-  onTestAsStudentWithToken: (token: string) => void;
+  isLoadingExams: boolean;
+  examsError: string | null;
+  onRefreshExams: () => Promise<void>;
 }
 
 type TeacherTab = 'bank_soal' | 'monitoring';
@@ -125,9 +130,12 @@ function createEmptyQuestionDraft(type: QuestionType = 'multiple_choice'): Quest
 }
 
 export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
+  teacherUserId,
+  teacherName,
   exams,
-  onSaveExams,
-  onTestAsStudentWithToken,
+  isLoadingExams,
+  examsError,
+  onRefreshExams,
 }) => {
   const [activeTab, setActiveTab] = useState<TeacherTab>('bank_soal');
   const [selectedExamId, setSelectedExamId] = useState<string>(() => exams[0]?.id ?? '');
@@ -137,7 +145,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   const [editingExamMetaId, setEditingExamMetaId] = useState<string | null>(null);
   const [examTitle, setExamTitle] = useState('');
   const [examSubject, setExamSubject] = useState('');
-  const [examLecturer, setExamLecturer] = useState('Dr. Hendra Wijaya, M.Kom.');
+  const [examLecturer, setExamLecturer] = useState(teacherName || 'Tim Pengajar');
   const [examDuration, setExamDuration] = useState(60);
   const [examPassingScore, setExamPassingScore] = useState(70);
   const [examToken, setExamToken] = useState('');
@@ -145,11 +153,15 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   const [shuffleOptions, setShuffleOptions] = useState(true);
   const [examStatus, setExamStatus] = useState<'published' | 'draft'>('published');
   const [examFormError, setExamFormError] = useState<string | null>(null);
+  const [isSavingExam, setIsSavingExam] = useState(false);
 
   // Question editor state
   const [isQuestionEditorOpen, setIsQuestionEditorOpen] = useState(false);
   const [questionDraft, setQuestionDraft] = useState<QuestionDraft>(createEmptyQuestionDraft);
   const [questionFormError, setQuestionFormError] = useState<string | null>(null);
+  const [isSavingQuestion, setIsSavingQuestion] = useState(false);
+  const [deletingQuestionId, setDeletingQuestionId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [openOptionImageIdx, setOpenOptionImageIdx] = useState<number | null>(null);
   const [imageUploadError, setImageUploadError] = useState<string | null>(null);
   const [previewImgError, setPreviewImgError] = useState(false);
@@ -159,8 +171,11 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   // Token copied notice
   const [copiedTokenId, setCopiedTokenId] = useState<string | null>(null);
 
-  // Monitoring state
+  // Monitoring state (fetched from Supabase)
   const [monitoringRefreshTick, setMonitoringRefreshTick] = useState(0);
+  const [monitoringAttempts, setMonitoringAttempts] = useState<ExamAttemptState[]>([]);
+  const [isLoadingMonitoring, setIsLoadingMonitoring] = useState(false);
+  const [monitoringError, setMonitoringError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<MonitoringFilter>('all');
   const [inspectViolationAttempt, setInspectViolationAttempt] =
@@ -168,6 +183,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   const [gradingEssayAttempt, setGradingEssayAttempt] =
     useState<ExamAttemptState | null>(null);
   const [essayScoreInputs, setEssayScoreInputs] = useState<Record<string, string>>({});
+  const [isSavingEssayScore, setIsSavingEssayScore] = useState(false);
 
   // Bulk Import & Print Generators state
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
@@ -196,21 +212,46 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
     registeredCount: 0,
     proctorName: 'Andi Pratama, S.Kom.',
     proctorNip: '198904122015041002',
-    lecturerName: 'Dr. Hendra Wijaya, M.Kom.',
+    lecturerName: teacherName || 'Tim Pengajar',
     lecturerNip: '198207182008121001',
     specialNotes: '',
   });
+
+  useEffect(() => {
+    if (exams.length > 0 && !exams.some((e) => e.id === selectedExamId)) {
+      setSelectedExamId(exams[0].id);
+    }
+  }, [exams, selectedExamId]);
 
   const selectedExam = useMemo(
     () => exams.find((e) => e.id === selectedExamId) ?? exams[0],
     [exams, selectedExamId],
   );
 
-  const monitoringAttempts = useMemo(() => {
-    void monitoringRefreshTick;
-    if (!selectedExam) return [];
-    return getMonitoringAttemptsByExam(selectedExam.id);
-  }, [selectedExam, monitoringRefreshTick]);
+  const fetchMonitoring = useCallback(async (exam: ExamConfig | undefined) => {
+    if (!exam) {
+      setMonitoringAttempts([]);
+      return;
+    }
+    setIsLoadingMonitoring(true);
+    setMonitoringError(null);
+    try {
+      const rows = await teacherExamService.getLiveMonitoring(exam.id);
+      setMonitoringAttempts(mapMonitoringRowsToAttempts(rows ?? [], exam));
+    } catch (err: unknown) {
+      const msg =
+        err instanceof Error ? err.message : 'Gagal memuat data monitoring dari Supabase.';
+      setMonitoringError(msg);
+    } finally {
+      setIsLoadingMonitoring(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeTab === 'monitoring' && selectedExam) {
+      void fetchMonitoring(selectedExam);
+    }
+  }, [activeTab, selectedExam, monitoringRefreshTick, fetchMonitoring]);
 
   const filteredAttempts = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -228,12 +269,16 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
     const total = monitoringAttempts.length;
     const inProgress = monitoringAttempts.filter((a) => a.status === 'in_progress').length;
     const submitted = monitoringAttempts.filter((a) => a.status === 'submitted');
+    const scoredList = submitted
+      .map((a) =>
+        a.serverScore !== null && a.serverScore !== undefined
+          ? a.serverScore
+          : a.gradingSummary?.score ?? null,
+      )
+      .filter((s): s is number => s !== null);
     const avgScore =
-      submitted.length > 0
-        ? Math.round(
-            submitted.reduce((sum, a) => sum + (a.gradingSummary?.score ?? 0), 0) /
-              submitted.length,
-          )
+      scoredList.length > 0
+        ? Math.round(scoredList.reduce((sum, s) => sum + s, 0) / scoredList.length)
         : null;
     const totalViolations = monitoringAttempts.reduce(
       (sum, a) => sum + a.violations.length,
@@ -253,7 +298,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
     setEditingExamMetaId(null);
     setExamTitle('');
     setExamSubject('');
-    setExamLecturer('Dr. Hendra Wijaya, M.Kom.');
+    setExamLecturer(teacherName || 'Tim Pengajar');
     setExamDuration(60);
     setExamPassingScore(70);
     setExamToken(generateExamToken(exams.map((e) => e.token)));
@@ -280,7 +325,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
     setIsCreatingExam(true);
   };
 
-  const handleSaveExam = (e: React.FormEvent) => {
+  const handleSaveExam = async (e: React.FormEvent) => {
     e.preventDefault();
     const cleanedTitle = examTitle.trim();
     const cleanedToken = examToken.trim().toUpperCase();
@@ -302,53 +347,44 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
       return;
     }
 
-    if (editingExamMetaId) {
-      const nextExams = exams.map((item) =>
-        item.id === editingExamMetaId
-          ? {
-              ...item,
-              title: cleanedTitle,
-              subject: examSubject.trim() || 'Mata Kuliah Umum',
-              lecturer: examLecturer.trim() || 'Tim Pengajar',
-              durationMinutes: Math.max(5, Number(examDuration) || 60),
-              passingScore: Math.min(100, Math.max(0, Number(examPassingScore) || 70)),
-              token: cleanedToken,
-              shuffleQuestions,
-              shuffleOptions,
-              status: examStatus,
-            }
-          : item,
-      );
-      onSaveExams(nextExams);
-      setIsCreatingExam(false);
-      setEditingExamMetaId(null);
-      return;
+    setIsSavingExam(true);
+    setExamFormError(null);
+
+    try {
+      if (editingExamMetaId) {
+        await teacherExamService.updateExam(editingExamMetaId, {
+          title: cleanedTitle,
+          token: cleanedToken,
+          durationMinutes: Math.max(5, Number(examDuration) || 60),
+          shuffleQuestions,
+          shuffleOptions,
+          status: examStatus,
+        });
+        await onRefreshExams();
+        setIsCreatingExam(false);
+        setEditingExamMetaId(null);
+      } else {
+        const newId = await teacherExamService.createExam({
+          createdBy: teacherUserId,
+          title: cleanedTitle,
+          token: cleanedToken,
+          durationMinutes: Math.max(5, Number(examDuration) || 60),
+          shuffleQuestions,
+          shuffleOptions,
+          status: examStatus,
+        });
+        await onRefreshExams();
+        setSelectedExamId(newId);
+        setIsCreatingExam(false);
+        setIsQuestionEditorOpen(true);
+        setQuestionDraft(createEmptyQuestionDraft());
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Gagal menyimpan ujian ke Supabase.';
+      setExamFormError(msg);
+    } finally {
+      setIsSavingExam(false);
     }
-
-    const newId = `exam-${Date.now()}`;
-    const createdExam: ExamConfig = {
-      id: newId,
-      token: cleanedToken,
-      title: cleanedTitle,
-      subject: examSubject.trim() || 'Mata Kuliah Umum',
-      lecturer: examLecturer.trim() || 'Tim Pengajar',
-      durationMinutes: Math.max(5, Number(examDuration) || 60),
-      totalQuestions: 0,
-      passingScore: Math.min(100, Math.max(0, Number(examPassingScore) || 70)),
-      scheduleWindow: 'Aktif Hari Ini',
-      shuffleQuestions,
-      shuffleOptions,
-      status: examStatus,
-      instructions: DEFAULT_EXAM_INSTRUCTIONS,
-      questions: [],
-    };
-
-    const nextExams = [createdExam, ...exams];
-    onSaveExams(nextExams);
-    setSelectedExamId(newId);
-    setIsCreatingExam(false);
-    setIsQuestionEditorOpen(true);
-    setQuestionDraft(createEmptyQuestionDraft());
   };
 
   // Question CRUD
@@ -456,7 +492,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
     }
   };
 
-  const handleSaveQuestion = (e: React.FormEvent) => {
+  const handleSaveQuestion = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedExam) return;
 
@@ -483,76 +519,77 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
     const cleanedQuestionImage = questionDraft.image_url.trim() || undefined;
     const cleanedRubric = isEssay ? questionDraft.rubric.trim() || undefined : undefined;
 
-    const existingList = selectedExam.questions;
-    let updatedQuestions: StoredQuestion[];
-
-    if (questionDraft.id) {
-      updatedQuestions = existingList.map((q) =>
-        q.id === questionDraft.id
-          ? {
-              ...q,
-              type: questionDraft.type,
-              question_type: questionDraft.type,
-              topic: questionDraft.topic.trim() || 'Umum',
-              prompt: cleanedPrompt,
-              image_url: cleanedQuestionImage,
-              codeSnippet: questionDraft.codeSnippet.trim() || undefined,
-              weight: Math.max(1, Number(questionDraft.weight) || 1),
-              rubric: cleanedRubric,
-              options: cleanedOptions,
-              correctOptionId: isEssay ? '' : questionDraft.correctOptionId,
-            }
-          : q,
-      );
-    } else {
-      const newQuestion: StoredQuestion = {
-        id: `q-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
-        order: existingList.length + 1,
-        topic: questionDraft.topic.trim() || 'Umum',
-        type: questionDraft.type,
-        question_type: questionDraft.type,
-        prompt: cleanedPrompt,
-        image_url: cleanedQuestionImage,
-        codeSnippet: questionDraft.codeSnippet.trim() || undefined,
-        weight: Math.max(1, Number(questionDraft.weight) || 1),
-        rubric: cleanedRubric,
-        options: cleanedOptions,
-        correctOptionId: isEssay ? '' : questionDraft.correctOptionId,
-      };
-      updatedQuestions = [...existingList, newQuestion];
-    }
-
-    const nextExams = exams.map((ex) =>
-      ex.id === selectedExam.id
-        ? {
-            ...ex,
-            questions: updatedQuestions.map((q, idx) => ({ ...q, order: idx + 1 })),
-            totalQuestions: updatedQuestions.length,
-          }
-        : ex,
-    );
-
-    onSaveExams(nextExams);
-    setIsQuestionEditorOpen(false);
+    setIsSavingQuestion(true);
     setQuestionFormError(null);
+    setActionError(null);
+
+    try {
+      if (questionDraft.id) {
+        const existingIdx = selectedExam.questions.findIndex((q) => q.id === questionDraft.id);
+        const updatedQ: StoredQuestion = {
+          id: questionDraft.id,
+          order: existingIdx >= 0 ? existingIdx + 1 : 1,
+          type: questionDraft.type,
+          question_type: questionDraft.type,
+          topic: questionDraft.topic.trim() || 'Umum',
+          prompt: cleanedPrompt,
+          image_url: cleanedQuestionImage,
+          codeSnippet: questionDraft.codeSnippet.trim() || undefined,
+          weight: Math.max(1, Number(questionDraft.weight) || 1),
+          rubric: cleanedRubric,
+          options: cleanedOptions,
+          correctOptionId: isEssay ? '' : questionDraft.correctOptionId,
+        };
+        await teacherExamService.updateQuestion(
+          updatedQ,
+          existingIdx >= 0 ? existingIdx : 0,
+        );
+      } else {
+        const newQuestion: StoredQuestion = {
+          id: '',
+          order: selectedExam.questions.length + 1,
+          topic: questionDraft.topic.trim() || 'Umum',
+          type: questionDraft.type,
+          question_type: questionDraft.type,
+          prompt: cleanedPrompt,
+          image_url: cleanedQuestionImage,
+          codeSnippet: questionDraft.codeSnippet.trim() || undefined,
+          weight: Math.max(1, Number(questionDraft.weight) || 1),
+          rubric: cleanedRubric,
+          options: cleanedOptions,
+          correctOptionId: isEssay ? '' : questionDraft.correctOptionId,
+        };
+        await teacherExamService.insertQuestion(
+          selectedExam.id,
+          newQuestion,
+          selectedExam.questions.length,
+        );
+      }
+
+      await onRefreshExams();
+      setIsQuestionEditorOpen(false);
+      setQuestionFormError(null);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Gagal menyimpan soal ke Supabase.';
+      setQuestionFormError(msg);
+    } finally {
+      setIsSavingQuestion(false);
+    }
   };
 
-  const handleDeleteQuestion = (questionId: string) => {
+  const handleDeleteQuestion = async (questionId: string) => {
     if (!selectedExam) return;
-    const filtered = selectedExam.questions
-      .filter((q) => q.id !== questionId)
-      .map((q, idx) => ({ ...q, order: idx + 1 }));
-
-    const nextExams = exams.map((ex) =>
-      ex.id === selectedExam.id
-        ? {
-            ...ex,
-            questions: filtered,
-            totalQuestions: filtered.length,
-          }
-        : ex,
-    );
-    onSaveExams(nextExams);
+    setDeletingQuestionId(questionId);
+    setActionError(null);
+    try {
+      await teacherExamService.deleteQuestion(questionId);
+      await onRefreshExams();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Gagal menghapus soal dari Supabase.';
+      setActionError(msg);
+    } finally {
+      setDeletingQuestionId(null);
+    }
   };
 
   const handleCopyToken = (token: string, examId: string) => {
@@ -561,30 +598,29 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
     window.setTimeout(() => setCopiedTokenId(null), 1800);
   };
 
-  const handleImportValidQuestions = (importedQuestions: StoredQuestion[]) => {
+  const handleImportValidQuestions = async (importedQuestions: StoredQuestion[]) => {
     if (!selectedExam || importedQuestions.length === 0) return;
-    const merged = [...selectedExam.questions, ...importedQuestions].map((q, idx) => ({
-      ...q,
-      order: idx + 1,
-    }));
-    const nextExams = exams.map((ex) =>
-      ex.id === selectedExam.id
-        ? {
-            ...ex,
-            questions: merged,
-            totalQuestions: merged.length,
-          }
-        : ex,
-    );
-    onSaveExams(nextExams);
-    setImportSuccessNotice(
-      `Berhasil mengimpor ${importedQuestions.length} soal valid ke paket "${selectedExam.title}".`,
-    );
-    window.setTimeout(() => setImportSuccessNotice(null), 5000);
+    setActionError(null);
+    try {
+      await teacherExamService.insertQuestionsBatch(
+        selectedExam.id,
+        importedQuestions,
+        selectedExam.questions.length,
+      );
+      await onRefreshExams();
+      setImportSuccessNotice(
+        `Berhasil mengimpor ${importedQuestions.length} soal valid ke paket "${selectedExam.title}" di Supabase.`,
+      );
+      window.setTimeout(() => setImportSuccessNotice(null), 5000);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Gagal mengimpor soal ke Supabase.';
+      setActionError(msg);
+    }
   };
 
   const handleOpenCardsGenerator = () => {
     if (!selectedExam) return;
+    void fetchMonitoring(selectedExam);
     const baseRoster = monitoringAttempts.map((att, idx) => ({
       id: `pc-init-${att.attemptId}`,
       fullName: att.student.fullName,
@@ -593,9 +629,8 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
     }));
 
     const fallbackSamples = [
-      { id: 'pc-sample-1', fullName: 'Rizky Pratama', nim: '210401018', roomSession: 'Lab CBT 01 · Sesi 1' },
-      { id: 'pc-sample-2', fullName: 'Nadia Kusuma', nim: '210401024', roomSession: 'Lab CBT 02 · Sesi 1' },
-      { id: 'pc-sample-3', fullName: 'Dimas Wijaya', nim: '210401031', roomSession: 'Lab CBT 02 · Sesi 1' },
+      { id: 'pc-sample-1', fullName: 'Peserta Sesi 1', nim: 'ID-001', roomSession: 'Lab CBT 01 · Sesi 1' },
+      { id: 'pc-sample-2', fullName: 'Peserta Sesi 2', nim: 'ID-002', roomSession: 'Lab CBT 02 · Sesi 1' },
     ];
 
     setCardsConfig((prev) => ({
@@ -605,7 +640,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
         prev.participants.length > 0
           ? prev.participants
           : baseRoster.length > 0
-            ? [...baseRoster, ...fallbackSamples].slice(0, 8)
+            ? baseRoster
             : fallbackSamples,
     }));
     setIsBeritaAcaraModalOpen(false);
@@ -710,51 +745,61 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
               </div>
 
               <div className="space-y-2.5">
-                {exams.map((ex) => {
-                  const isSelected = selectedExam?.id === ex.id;
-                  return (
-                    <button
-                      key={ex.id}
-                      type="button"
-                      onClick={() => {
-                        setSelectedExamId(ex.id);
-                        setIsQuestionEditorOpen(false);
-                      }}
-                      className={`w-full text-left p-4 rounded-xl border transition-colors cursor-pointer focus-ring ${
-                        isSelected
-                          ? 'border-[#2563EB] bg-blue-50/40'
-                          : 'border-slate-200 bg-white hover:bg-slate-50'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between gap-2 mb-1.5">
-                        <span className="font-mono text-xs font-bold tracking-wider text-[#2563EB]">
-                          TOKEN: {ex.token}
-                        </span>
-                        <span
-                          className={`text-[11px] font-semibold ${
-                            ex.status === 'published' ? 'text-[#16A34A]' : 'text-slate-500'
-                          }`}
-                        >
-                          {ex.status === 'published' ? 'Aktif' : 'Draft'}
-                        </span>
-                      </div>
-                      <p className="text-sm font-semibold text-slate-900 line-clamp-2 mb-2">
-                        {ex.title}
-                      </p>
-                      <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 tabular-nums">
-                        <span>{ex.questions.length} soal</span>
-                        <span aria-hidden="true">·</span>
-                        <span>{ex.durationMinutes} menit</span>
-                        {ex.shuffleQuestions && (
-                          <>
-                            <span aria-hidden="true">·</span>
-                            <span>Acak Soal</span>
-                          </>
-                        )}
-                      </div>
-                    </button>
-                  );
-                })}
+                {isLoadingExams ? (
+                  <p className="text-xs text-slate-500 py-4 text-center">
+                    Memuat paket ujian dari Supabase...
+                  </p>
+                ) : exams.length === 0 ? (
+                  <p className="text-xs text-slate-500 py-4 text-center">
+                    Belum ada paket ujian tersimpan. Klik &quot;Buat Ujian&quot; untuk memulai.
+                  </p>
+                ) : (
+                  exams.map((ex) => {
+                    const isSelected = selectedExam?.id === ex.id;
+                    return (
+                      <button
+                        key={ex.id}
+                        type="button"
+                        onClick={() => {
+                          setSelectedExamId(ex.id);
+                          setIsQuestionEditorOpen(false);
+                        }}
+                        className={`w-full text-left p-4 rounded-xl border transition-colors cursor-pointer focus-ring ${
+                          isSelected
+                            ? 'border-[#2563EB] bg-blue-50/40'
+                            : 'border-slate-200 bg-white hover:bg-slate-50'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2 mb-1.5">
+                          <span className="font-mono text-xs font-bold tracking-wider text-[#2563EB]">
+                            TOKEN: {ex.token}
+                          </span>
+                          <span
+                            className={`text-[11px] font-semibold ${
+                              ex.status === 'published' ? 'text-[#16A34A]' : 'text-slate-500'
+                            }`}
+                          >
+                            {ex.status === 'published' ? 'Aktif' : 'Draft'}
+                          </span>
+                        </div>
+                        <p className="text-sm font-semibold text-slate-900 line-clamp-2 mb-2">
+                          {ex.title}
+                        </p>
+                        <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 tabular-nums">
+                          <span>{ex.questions.length} soal</span>
+                          <span aria-hidden="true">·</span>
+                          <span>{ex.durationMinutes} menit</span>
+                          {ex.shuffleQuestions && (
+                            <>
+                              <span aria-hidden="true">·</span>
+                              <span>Acak Soal</span>
+                            </>
+                          )}
+                        </div>
+                      </button>
+                    );
+                  })
+                )}
               </div>
             </div>
 
@@ -916,9 +961,14 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                   </button>
                   <button
                     type="submit"
-                    className="px-4 py-2 text-xs font-semibold text-white bg-[#2563EB] hover:bg-blue-700 rounded-lg transition-colors cursor-pointer"
+                    disabled={isSavingExam}
+                    className="px-4 py-2 text-xs font-semibold text-white bg-[#2563EB] hover:bg-blue-700 disabled:bg-blue-400 rounded-lg transition-colors cursor-pointer"
                   >
-                    {editingExamMetaId ? 'Simpan Perubahan' : 'Simpan Ujian'}
+                    {isSavingExam
+                      ? 'Menyimpan...'
+                      : editingExamMetaId
+                        ? 'Simpan Perubahan'
+                        : 'Simpan Ujian'}
                   </button>
                 </div>
               </form>
@@ -986,20 +1036,6 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                       >
                         <Edit3 className="w-3.5 h-3.5" aria-hidden="true" />
                         <span>Pengaturan</span>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => onTestAsStudentWithToken(selectedExam.token)}
-                        disabled={selectedExam.questions.length === 0 || selectedExam.status !== 'published'}
-                        title={
-                          selectedExam.questions.length === 0
-                            ? 'Tambahkan minimal 1 soal terlebih dahulu'
-                            : 'Uji langsung di tampilan Peserta Ujian'
-                        }
-                        className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 disabled:bg-slate-300 disabled:cursor-not-allowed rounded-lg transition-colors cursor-pointer"
-                      >
-                        <span>Uji sebagai Peserta</span>
                       </button>
                     </div>
                   </div>
@@ -1516,9 +1552,10 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                       </button>
                       <button
                         type="submit"
-                        className="px-5 py-2 text-xs font-semibold text-white bg-[#2563EB] hover:bg-blue-700 rounded-lg transition-colors cursor-pointer"
+                        disabled={isSavingQuestion}
+                        className="px-5 py-2 text-xs font-semibold text-white bg-[#2563EB] hover:bg-blue-700 disabled:bg-blue-400 rounded-lg transition-colors cursor-pointer"
                       >
-                        Simpan Soal ke Bank Soal
+                        {isSavingQuestion ? 'Menyimpan...' : 'Simpan Soal ke Bank Soal'}
                       </button>
                     </div>
                   </form>
@@ -1596,6 +1633,22 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                       </button>
                     </div>
                   </div>
+
+                  {(examsError || actionError) && (
+                    <div className="mb-4 p-3 rounded-lg bg-red-50 border border-red-200 text-xs font-medium text-red-800 flex items-center justify-between gap-2">
+                      <span className="inline-flex items-center gap-2">
+                        <AlertCircle className="w-4 h-4 text-[#DC2626] shrink-0" aria-hidden="true" />
+                        <span>{actionError || examsError}</span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setActionError(null)}
+                        className="text-red-700 hover:text-red-950 cursor-pointer"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  )}
 
                   {importSuccessNotice && (
                     <div className="mb-4 p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-xs font-medium text-emerald-900 flex items-center justify-between gap-2">
@@ -1682,11 +1735,12 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                               </button>
                               <button
                                 type="button"
-                                onClick={() => handleDeleteQuestion(q.id)}
-                                className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-red-600 hover:bg-red-50 rounded-md transition-colors cursor-pointer"
+                                disabled={deletingQuestionId === q.id}
+                                onClick={() => void handleDeleteQuestion(q.id)}
+                                className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-red-600 hover:bg-red-50 disabled:opacity-50 rounded-md transition-colors cursor-pointer"
                               >
                                 <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
-                                <span>Hapus</span>
+                                <span>{deletingQuestionId === q.id ? 'Menghapus...' : 'Hapus'}</span>
                               </button>
                             </div>
                           </div>
@@ -1792,7 +1846,27 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                   )}
                 </div>
               </>
-            ) : null}
+            ) : (
+              <div className="bg-white border border-slate-200 rounded-xl p-10 text-center space-y-3">
+                <p className="text-base font-bold text-slate-900">
+                  {isLoadingExams ? 'Memuat Data Ujian...' : 'Belum Ada Paket Ujian Terdaftar'}
+                </p>
+                <p className="text-xs sm:text-sm text-slate-500 max-w-md mx-auto">
+                  Buat paket ujian baru terlebih dahulu untuk mulai menambahkan butir soal pilihan
+                  ganda atau esai di Supabase.
+                </p>
+                {!isLoadingExams && (
+                  <button
+                    type="button"
+                    onClick={openCreateExamForm}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-[#2563EB] hover:bg-blue-700 rounded-lg transition-colors cursor-pointer"
+                  >
+                    <Plus className="w-4 h-4" aria-hidden="true" />
+                    <span>Buat Ujian Pertama</span>
+                  </button>
+                )}
+              </div>
+            )}
           </section>
         </div>
       )}
@@ -1938,7 +2012,18 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
               </div>
             </div>
 
-            {filteredAttempts.length === 0 ? (
+            {monitoringError && (
+              <div className="mx-5 mt-4 p-3 rounded-lg bg-red-50 border border-red-200 text-xs text-red-800 flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 text-[#DC2626] shrink-0" aria-hidden="true" />
+                <span>{monitoringError}</span>
+              </div>
+            )}
+
+            {isLoadingMonitoring ? (
+              <div className="py-12 px-6 text-center text-sm text-slate-500">
+                Memuat data pemantauan langsung dari Supabase...
+              </div>
+            ) : filteredAttempts.length === 0 ? (
               <div className="py-12 px-6 text-center space-y-2">
                 <p className="text-sm font-semibold text-slate-700">
                   Belum ada data peserta untuk filter ini.
@@ -2085,24 +2170,33 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
 
                           <td className="py-3.5 px-4 text-right whitespace-nowrap font-mono tabular-nums font-bold">
                             {att.status === 'submitted' && summary ? (
-                              <div className="inline-flex flex-col items-end">
-                                <span
-                                  className={
-                                    isPendingEssay
-                                      ? 'text-slate-700'
-                                      : summary.passed
-                                        ? 'text-[#16A34A]'
-                                        : 'text-[#DC2626]'
-                                  }
-                                >
-                                  {summary.score}
-                                </span>
-                                {isPendingEssay && (
-                                  <span className="font-sans text-[10px] font-medium text-amber-700">
-                                    Sementara
-                                  </span>
-                                )}
-                              </div>
+                              (() => {
+                                const displayScore =
+                                  att.serverScore !== null && att.serverScore !== undefined
+                                    ? att.serverScore
+                                    : summary.score;
+                                const passed = displayScore >= selectedExam.passingScore;
+                                return (
+                                  <div className="inline-flex flex-col items-end">
+                                    <span
+                                      className={
+                                        isPendingEssay
+                                          ? 'text-slate-700'
+                                          : passed
+                                            ? 'text-[#16A34A]'
+                                            : 'text-[#DC2626]'
+                                      }
+                                    >
+                                      {displayScore}
+                                    </span>
+                                    {isPendingEssay && (
+                                      <span className="font-sans text-[10px] font-medium text-amber-700">
+                                        Sementara
+                                      </span>
+                                    )}
+                                  </div>
+                                );
+                              })()
                             ) : (
                               <span className="text-slate-400 font-normal">—</span>
                             )}
@@ -2213,48 +2307,48 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
           parsedEssayScores,
         );
 
-        const handleSaveEssayGrading = (e: React.FormEvent) => {
+        const handleSaveEssayGrading = async (e: React.FormEvent) => {
           e.preventDefault();
-          const finalEssayScores: Record<string, number> = {};
-          for (const q of essayQuestions) {
-            const raw = essayScoreInputs[q.id];
-            if (raw !== undefined && raw.trim() !== '' && !Number.isNaN(Number(raw))) {
-              finalEssayScores[q.id] = Math.min(q.weight, Math.max(0, Number(raw)));
-            }
-          }
-          const nextSummary = evaluateExamAnswers(
-            selectedExam.questions,
-            gradingEssayAttempt.answers,
-            selectedExam.passingScore,
-            gradingEssayAttempt.questionOrder,
-            gradingEssayAttempt.optionOrders,
-            finalEssayScores,
-          );
-          const updatedAttempt: ExamAttemptState = {
-            ...gradingEssayAttempt,
-            essayScores: finalEssayScores,
-            gradingSummary: nextSummary,
-          };
-          upsertMonitoringAttempt(updatedAttempt);
-
-          // Sinkronkan juga ke active attempt di localStorage jika ID cocok
+          setIsSavingEssayScore(true);
           try {
-            const activeRaw = window.localStorage.getItem('examcore_active_attempt_v1');
-            if (activeRaw) {
-              const activeParsed = JSON.parse(activeRaw) as ExamAttemptState;
-              if (activeParsed.attemptId === updatedAttempt.attemptId) {
-                window.localStorage.setItem(
-                  'examcore_active_attempt_v1',
-                  JSON.stringify(updatedAttempt),
-                );
+            const finalEssayScores: Record<string, number> = {};
+            for (const q of essayQuestions) {
+              const raw = essayScoreInputs[q.id];
+              if (raw !== undefined && raw.trim() !== '' && !Number.isNaN(Number(raw))) {
+                finalEssayScores[q.id] = Math.min(q.weight, Math.max(0, Number(raw)));
               }
             }
-          } catch {
-            // Ignore
+            const nextSummary = evaluateExamAnswers(
+              selectedExam.questions,
+              gradingEssayAttempt.answers,
+              selectedExam.passingScore,
+              gradingEssayAttempt.questionOrder,
+              gradingEssayAttempt.optionOrders,
+              finalEssayScores,
+            );
+            await teacherExamService.updateAttemptScore(
+              gradingEssayAttempt.attemptId,
+              nextSummary.score,
+            );
+            const updatedAttempt: ExamAttemptState = {
+              ...gradingEssayAttempt,
+              essayScores: finalEssayScores,
+              gradingSummary: nextSummary,
+              serverScore: nextSummary.score,
+            };
+            setMonitoringAttempts((prev) =>
+              prev.map((a) =>
+                a.attemptId === updatedAttempt.attemptId ? updatedAttempt : a,
+              ),
+            );
+            setGradingEssayAttempt(null);
+          } catch (err: unknown) {
+            const msg =
+              err instanceof Error ? err.message : 'Gagal memperbarui skor ke Supabase.';
+            setMonitoringError(msg);
+          } finally {
+            setIsSavingEssayScore(false);
           }
-
-          setMonitoringRefreshTick((t) => t + 1);
-          setGradingEssayAttempt(null);
         };
 
         return (
@@ -2456,9 +2550,10 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                   </button>
                   <button
                     type="submit"
-                    className="px-5 py-2 text-xs font-semibold text-white bg-[#2563EB] hover:bg-blue-700 rounded-lg cursor-pointer"
+                    disabled={isSavingEssayScore}
+                    className="px-5 py-2 text-xs font-semibold text-white bg-[#2563EB] hover:bg-blue-700 disabled:bg-blue-400 rounded-lg cursor-pointer"
                   >
-                    Simpan Nilai Esai
+                    {isSavingEssayScore ? 'Menyimpan...' : 'Simpan Nilai Esai'}
                   </button>
                 </div>
               </div>

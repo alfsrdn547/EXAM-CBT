@@ -69,7 +69,7 @@ export const RulesModal: React.FC<RulesModalProps> = ({
               <span className="block text-xs text-slate-500">Paket Ujian</span>
               <span className="font-semibold text-slate-900">{exam.subject}</span>
               <span className="block text-xs text-slate-600 tabular-nums">
-                {exam.questions.length} Soal · {exam.durationMinutes} Menit
+                {exam.totalQuestions || exam.questions.length} Soal · {exam.durationMinutes} Menit
               </span>
             </div>
           </div>

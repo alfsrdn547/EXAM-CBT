@@ -227,8 +227,12 @@ export function exportMonitoringToCsv(exam: ExamConfig, attempts: ExamAttemptSta
             ? 'Selesai Dikoreksi'
             : 'Auto-Graded';
     const scoreValue =
-      att.status === 'submitted' && att.gradingSummary
-        ? att.gradingSummary.score
+      att.status === 'submitted'
+        ? att.serverScore !== null && att.serverScore !== undefined
+          ? att.serverScore
+          : att.gradingSummary
+            ? att.gradingSummary.score
+            : '-'
         : '-';
     const startedStr = new Date(att.startedAt).toLocaleString('id-ID');
     const submittedStr = att.submittedAt

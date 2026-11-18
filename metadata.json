@@ -2,5 +2,7 @@
   "name": "ExamCore CBT",
   "description": "Platform Computer-Based Test (CBT) offline-first dengan sinkronisasi otomatis dan antarmuka bebas distraksi untuk peserta ujian.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

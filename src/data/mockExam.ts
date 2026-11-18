@@ -545,7 +545,7 @@ export function countAnsweredQuestions(
  * serta menghormati urutan soal & opsi yang diacak deterministik saat sesi dimulai.
  */
 export function buildStudentQuestions(
-  storedQuestions: StoredQuestion[],
+  storedQuestions: Question[],
   questionOrder?: string[],
   optionOrders?: Record<string, string[]>,
 ): Question[] {
@@ -554,7 +554,7 @@ export function buildStudentQuestions(
     questionOrder && questionOrder.length > 0
       ? questionOrder
           .map((id) => map.get(id))
-          .filter((q): q is StoredQuestion => Boolean(q))
+          .filter((q): q is Question => Boolean(q))
       : storedQuestions;
 
   // Sertakan soal baru apabila belum masuk urutan

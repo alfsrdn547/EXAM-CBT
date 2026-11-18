@@ -13,13 +13,14 @@ import {
   WifiOff,
   XCircle,
 } from 'lucide-react';
-import { ExamAttemptState, ExamConfig } from '../types/exam';
-import { evaluateExamAnswers } from '../data/mockExam';
+import { ExamAttemptState, ExamConfig, Question } from '../types/exam';
+import { countAnsweredQuestions, evaluateExamAnswers, isQuestionAnswered } from '../data/mockExam';
 import { formatTimeWIB } from '../utils/storage';
 import { MathText } from './MathText';
 
 interface SubmittedViewProps {
   exam: ExamConfig;
+  questions: Question[];
   attempt: ExamAttemptState;
   isSyncedToServer: boolean;
   onReturnToLobby: () => void;
@@ -27,24 +28,42 @@ interface SubmittedViewProps {
 
 export const SubmittedView: React.FC<SubmittedViewProps> = ({
   exam,
+  questions,
   attempt,
   isSyncedToServer,
   onReturnToLobby,
 }) => {
   const [showDetails, setShowDetails] = useState(true);
 
-  const grading =
-    attempt.gradingSummary ??
-    evaluateExamAnswers(
-      exam.questions,
-      attempt.answers,
-      exam.passingScore,
-      attempt.questionOrder,
-      attempt.optionOrders,
-      attempt.essayScores,
-    );
+  const isSupabaseMode = Boolean(attempt.isSupabaseSession);
+  const displayQuestions =
+    attempt.cachedQuestions && attempt.cachedQuestions.length > 0
+      ? attempt.cachedQuestions
+      : questions;
 
-  const isPendingEssay = grading.gradingStatus === 'pending_essay';
+  const hasAuthoritativeServerScore =
+    attempt.serverScore !== undefined && attempt.serverScore !== null;
+
+  const localGrading = !isSupabaseMode
+    ? attempt.gradingSummary ??
+      evaluateExamAnswers(
+        exam.questions,
+        attempt.answers,
+        exam.passingScore,
+        attempt.questionOrder,
+        attempt.optionOrders,
+        attempt.essayScores,
+      )
+    : null;
+
+  const answeredCount = countAnsweredQuestions(displayQuestions, attempt.answers);
+  const unansweredCount = Math.max(0, displayQuestions.length - answeredCount);
+  const effectiveScore = hasAuthoritativeServerScore
+    ? attempt.serverScore!
+    : localGrading?.score ?? null;
+  const isPassed =
+    effectiveScore !== null ? effectiveScore >= exam.passingScore : false;
+  const isPendingEssay = localGrading?.gradingStatus === 'pending_essay';
 
   const durationSpentSec = Math.max(
     1,
@@ -87,7 +106,7 @@ export const SubmittedView: React.FC<SubmittedViewProps> = ({
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 pb-6 border-b border-slate-200">
             <div className="space-y-1.5">
               <div className="flex items-center gap-2 text-xs font-medium text-slate-500">
-                <span>Ringkasan Nilai Otomatis</span>
+                <span>Ringkasan Pengumpulan Ujian</span>
                 <span aria-hidden="true">·</span>
                 <span className="font-mono tabular-nums">ID {attempt.attemptId.slice(0, 8)}</span>
               </div>
@@ -95,7 +114,9 @@ export const SubmittedView: React.FC<SubmittedViewProps> = ({
               <p className="text-sm text-slate-600">
                 Peserta: <strong className="text-slate-900">{attempt.student.fullName}</strong>{' '}
                 <span aria-hidden="true">·</span>{' '}
-                <span className="font-mono tabular-nums">NIM {attempt.student.nim}</span>
+                <span className="font-mono tabular-nums">
+                  {attempt.student.email || attempt.student.nim}
+                </span>
               </p>
               {attempt.submittedReason === 'timeout' && (
                 <p className="text-xs font-medium text-amber-800 pt-1">
@@ -112,9 +133,11 @@ export const SubmittedView: React.FC<SubmittedViewProps> = ({
                 </span>
                 <div className="flex items-baseline gap-1">
                   <span className="text-4xl font-bold font-mono tabular-nums text-slate-900">
-                    {grading.score}
+                    {effectiveScore !== null ? effectiveScore : '—'}
                   </span>
-                  <span className="text-sm font-mono text-slate-400">/100</span>
+                  {effectiveScore !== null && (
+                    <span className="text-sm font-mono text-slate-400">/100</span>
+                  )}
                 </div>
               </div>
 
@@ -122,14 +145,19 @@ export const SubmittedView: React.FC<SubmittedViewProps> = ({
 
               <div>
                 <span className="block text-xs font-medium text-slate-500 mb-1">
-                  Status (KKM {grading.passingScore})
+                  Status (KKM {exam.passingScore})
                 </span>
-                {isPendingEssay ? (
+                {effectiveScore === null ? (
+                  <span className="inline-flex items-center gap-1.5 text-sm font-bold text-[#2563EB]">
+                    <Clock className="w-4 h-4" aria-hidden="true" />
+                    <span>Diproses Server</span>
+                  </span>
+                ) : isPendingEssay ? (
                   <span className="inline-flex items-center gap-1.5 text-sm font-bold text-[#2563EB]">
                     <Clock className="w-4 h-4" aria-hidden="true" />
                     <span>Menunggu Koreksi Esai</span>
                   </span>
-                ) : grading.passed ? (
+                ) : isPassed ? (
                   <span className="inline-flex items-center gap-1.5 text-sm font-bold text-[#16A34A]">
                     <Award className="w-4 h-4" aria-hidden="true" />
                     <span>Lulus</span>
@@ -144,36 +172,18 @@ export const SubmittedView: React.FC<SubmittedViewProps> = ({
             </div>
           </div>
 
-          {isPendingEssay && (
-            <div className="mt-5 px-4 py-3 rounded-lg bg-blue-50 border border-blue-200 text-xs sm:text-sm text-blue-900">
-              Ujian ini memiliki <strong>{grading.essayCount} soal esai</strong>. Soal pilihan
-              ganda telah dinilai otomatis, sedangkan skor final akan diperbarui setelah pengajar
-              selesai mengoreksi jawaban esai Anda.
-            </div>
-          )}
-
-          {/* 4-Column Breakdown Metrics */}
+          {/* Breakdown Metrics */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-6 pt-6">
             <div>
               <div className="flex items-center gap-1.5 text-xs font-medium text-slate-500 mb-1">
                 <CheckCircle2 className="w-4 h-4 text-[#16A34A]" aria-hidden="true" />
-                <span>PG Benar</span>
+                <span>Soal Terjawab</span>
               </div>
               <p className="text-2xl font-bold font-mono tabular-nums text-slate-900">
-                {grading.correctCount}{' '}
+                {answeredCount}{' '}
                 <span className="text-xs font-normal text-slate-500">
-                  / {grading.totalQuestions - grading.essayCount}
+                  / {displayQuestions.length}
                 </span>
-              </p>
-            </div>
-
-            <div>
-              <div className="flex items-center gap-1.5 text-xs font-medium text-slate-500 mb-1">
-                <XCircle className="w-4 h-4 text-[#DC2626]" aria-hidden="true" />
-                <span>Jawaban Salah</span>
-              </div>
-              <p className="text-2xl font-bold font-mono tabular-nums text-slate-900">
-                {grading.incorrectCount}
               </p>
             </div>
 
@@ -183,7 +193,17 @@ export const SubmittedView: React.FC<SubmittedViewProps> = ({
                 <span>Tidak Dijawab</span>
               </div>
               <p className="text-2xl font-bold font-mono tabular-nums text-slate-900">
-                {grading.unansweredCount}
+                {unansweredCount}
+              </p>
+            </div>
+
+            <div>
+              <div className="flex items-center gap-1.5 text-xs font-medium text-slate-500 mb-1">
+                <ShieldAlert className="w-4 h-4 text-amber-600" aria-hidden="true" />
+                <span>Log Pelanggaran</span>
+              </div>
+              <p className="text-2xl font-bold font-mono tabular-nums text-slate-900">
+                {attempt.violations.length}
               </p>
             </div>
 
@@ -257,13 +277,13 @@ export const SubmittedView: React.FC<SubmittedViewProps> = ({
           )}
         </section>
 
-        {/* Per-Question Grading Breakdown */}
+        {/* Per-Question Submitted Answers Summary */}
         <section className="bg-white border border-slate-200 rounded-xl p-6 sm:p-8">
           <div className="flex items-center justify-between gap-4 pb-4 border-b border-slate-200">
             <div>
-              <h2 className="text-base font-bold text-slate-900">Rincian Evaluasi Jawaban</h2>
+              <h2 className="text-base font-bold text-slate-900">Rincian Jawaban Terkumpul</h2>
               <p className="text-xs text-slate-500 mt-0.5">
-                Perbandingan pilihan Anda terhadap kunci jawaban sistem
+                Daftar jawaban yang telah Anda kirimkan ke server
               </p>
             </div>
             <button
@@ -282,106 +302,84 @@ export const SubmittedView: React.FC<SubmittedViewProps> = ({
 
           {showDetails && (
             <div className="divide-y divide-slate-100 mt-2">
-              {grading.details.map((item) => (
-                <div
-                  key={item.questionId}
-                  className="py-4 flex flex-col sm:flex-row sm:items-start justify-between gap-4"
-                >
-                  <div className="space-y-1 flex-1">
-                    <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
-                      <span className="font-mono tabular-nums font-bold text-slate-900">
-                        Soal {item.order}
-                      </span>
-                      <span aria-hidden="true">·</span>
-                      <span>{item.questionType === 'essay' ? 'Esai' : 'Pilihan Ganda'}</span>
-                      <span aria-hidden="true">·</span>
-                      <span>{item.topic}</span>
-                    </div>
-                    <p className="text-sm text-slate-800 leading-relaxed">
-                      <MathText text={item.prompt} />
-                    </p>
+              {displayQuestions.map((q, idx) => {
+                const answered = isQuestionAnswered(q, attempt.answers);
+                const rawAns = attempt.answers[q.id];
+                const selectedOpt =
+                  q.type === 'multiple_choice'
+                    ? q.options.find((o) => o.id === rawAns)
+                    : undefined;
 
-                    {item.questionType === 'essay' ? (
-                      <div className="pt-1.5 space-y-1.5 text-xs">
-                        <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 text-slate-800 whitespace-pre-wrap leading-relaxed">
-                          <span className="block text-[11px] font-semibold text-slate-500 mb-1">
-                            Jawaban Esai Anda:
-                          </span>
-                          {item.essayAnswer ? (
-                            <MathText text={item.essayAnswer} />
-                          ) : (
-                            <span className="italic text-slate-400">Tidak dijawab</span>
-                          )}
-                        </div>
+                return (
+                  <div
+                    key={q.id}
+                    className="py-4 flex flex-col sm:flex-row sm:items-start justify-between gap-4"
+                  >
+                    <div className="space-y-1 flex-1">
+                      <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                        <span className="font-mono tabular-nums font-bold text-slate-900">
+                          Soal {idx + 1}
+                        </span>
+                        <span aria-hidden="true">·</span>
+                        <span>{q.type === 'essay' ? 'Esai' : 'Pilihan Ganda'}</span>
+                        <span aria-hidden="true">·</span>
+                        <span>{q.topic}</span>
                       </div>
-                    ) : (
-                      <div className="pt-1 flex flex-wrap gap-x-6 gap-y-1 text-xs">
-                        <span className="text-slate-600">
+                      <p className="text-sm text-slate-800 leading-relaxed">
+                        <MathText text={q.prompt} />
+                      </p>
+
+                      {q.type === 'essay' ? (
+                        <div className="pt-1.5 text-xs">
+                          <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 text-slate-800 whitespace-pre-wrap leading-relaxed">
+                            <span className="block text-[11px] font-semibold text-slate-500 mb-1">
+                              Jawaban Esai Anda:
+                            </span>
+                            {rawAns?.trim() ? (
+                              <MathText text={rawAns} />
+                            ) : (
+                              <span className="italic text-slate-400">Tidak dijawab</span>
+                            )}
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="pt-1 text-xs text-slate-600">
                           Jawaban Anda:{' '}
                           <strong className="text-slate-900">
-                            {item.selectedLabel ? (
+                            {selectedOpt ? (
                               <>
-                                {item.selectedLabel}. <MathText text={item.selectedText ?? ''} />
+                                {selectedOpt.label}. <MathText text={selectedOpt.text} />
                               </>
                             ) : (
                               'Kosong'
                             )}
                           </strong>
-                        </span>
-                        {item.status !== 'correct' && (
-                          <span className="text-emerald-800">
-                            Kunci Jawaban:{' '}
-                            <strong>
-                              {item.correctLabel}. <MathText text={item.correctText} />
-                            </strong>
-                          </span>
-                        )}
-                      </div>
-                    )}
-                  </div>
+                        </div>
+                      )}
+                    </div>
 
-                  <div className="shrink-0">
-                    {item.status === 'correct' && (
-                      <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#16A34A]">
-                        <CheckCircle2 className="w-4 h-4" aria-hidden="true" />
-                        <span>Benar</span>
-                      </span>
-                    )}
-                    {item.status === 'incorrect' && (
-                      <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#DC2626]">
-                        <XCircle className="w-4 h-4" aria-hidden="true" />
-                        <span>Salah</span>
-                      </span>
-                    )}
-                    {item.status === 'pending_review' && (
-                      <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#2563EB]">
-                        <Clock className="w-4 h-4" aria-hidden="true" />
-                        <span>Menunggu Koreksi</span>
-                      </span>
-                    )}
-                    {item.status === 'graded' && (
-                      <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#16A34A] font-mono tabular-nums">
-                        <CheckCircle2 className="w-4 h-4" aria-hidden="true" />
-                        <span>
-                          {item.earnedWeight}/{item.weight} poin
+                    <div className="shrink-0">
+                      {answered ? (
+                        <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#16A34A]">
+                          <CheckCircle2 className="w-4 h-4" aria-hidden="true" />
+                          <span>Terkirim</span>
                         </span>
-                      </span>
-                    )}
-                    {item.status === 'unanswered' && (
-                      <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-500">
-                        <HelpCircle className="w-4 h-4" aria-hidden="true" />
-                        <span>Kosong</span>
-                      </span>
-                    )}
+                      ) : (
+                        <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-500">
+                          <HelpCircle className="w-4 h-4" aria-hidden="true" />
+                          <span>Kosong</span>
+                        </span>
+                      )}
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
 
           <div className="mt-6 pt-5 border-t border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
             <p className="text-xs text-slate-500">
-              Ringkasan ini tersimpan di browser Anda hingga Anda memulai sesi ujian baru.
+              Hasil pengumpulan telah tercatat di Supabase.
             </p>
             <button
               type="button"

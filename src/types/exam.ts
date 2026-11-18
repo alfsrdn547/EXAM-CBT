@@ -118,6 +118,7 @@ export interface ExamAttemptState {
   questionOrder: string[];
   optionOrders: Record<string, string[]>;
   cachedQuestions?: Question[];
+  cachedExam?: ExamConfig;
   answers: Record<string, string>;
   essayScores?: Record<string, number>;
   flaggedIds: string[];
@@ -128,5 +129,9 @@ export interface ExamAttemptState {
   lastSavedLocallyAt?: number;
   lastSyncedAt?: number;
   pendingSync: boolean;
+  serverClockOffsetMs?: number;
+  serverMustSubmitBefore?: string;
+  serverScore?: number | null;
+  isSupabaseSession?: boolean;
   gradingSummary?: ExamGradingSummary;
 }

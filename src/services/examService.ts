@@ -61,7 +61,7 @@ export const authService = {
     if (error) throw error;
 
     const { data: profile } = await supabase
-      .from('profiles')
+      .from('profil')
       .select('role, full_name')
       .eq('id', data.user.id)
       .single();
@@ -93,7 +93,7 @@ export const authService = {
     }
 
     const { data: profile } = await supabase
-      .from('profiles')
+      .from('profil')
       .select('role, full_name')
       .eq('id', session.user.id)
       .single();
@@ -218,7 +218,7 @@ export function mapStartResponseToStudentQuestions(
 export const teacherExamService = {
   async getLiveMonitoring(examId: string) {
     const { data, error } = await supabase
-      .from('exam_attempts')
+      .from('percobaan_ujian')
       .select(`
         id,
         status,
@@ -227,7 +227,7 @@ export const teacherExamService = {
         answers,
         violation_logs,
         score,
-        profiles:student_id ( full_name )
+        profil ( full_name )
       `)
       .eq('exam_id', examId)
       .order('started_at', { ascending: false });
@@ -238,7 +238,7 @@ export const teacherExamService = {
 
   async getExamsWithQuestions(): Promise<ExamConfig[]> {
     const { data, error } = await supabase
-      .from('exams')
+      .from('ujian')
       .select(
         `
         id,
@@ -252,7 +252,7 @@ export const teacherExamService = {
         shuffle_options,
         status,
         created_at,
-        questions (
+        pertanyaan (
           id,
           exam_id,
           question_type,
@@ -263,12 +263,14 @@ export const teacherExamService = {
         )
       `,
       )
+      .is('deleted_date', null)
+      .is('pertanyaan.deleted_date', null)
       .order('created_at', { ascending: false });
 
     if (error) throw error;
 
     return (data ?? []).map((row: any) => {
-      const sortedQRows = [...(row.questions ?? [])].sort(
+      const sortedQRows = [...(row.pertanyaan ?? [])].sort(
         (a: any, b: any) => (a.order_index ?? 0) - (b.order_index ?? 0),
       );
       const questions = sortedQRows.map((qRow: any, idx: number) =>
@@ -326,7 +328,7 @@ export const teacherExamService = {
     const now = new Date();
     const end = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
     const { data, error } = await supabase
-      .from('exams')
+      .from('ujian')
       .insert({
         created_by: input.createdBy,
         title: input.title,
@@ -357,7 +359,7 @@ export const teacherExamService = {
     },
   ): Promise<void> {
     const { error } = await supabase
-      .from('exams')
+      .from('ujian')
       .update({
         title: input.title,
         token: input.token.trim().toUpperCase(),
@@ -366,7 +368,8 @@ export const teacherExamService = {
         shuffle_options: input.shuffleOptions,
         status: input.status,
       })
-      .eq('id', examId);
+      .eq('id', examId)
+      .is('deleted_date', null);
 
     if (error) throw error;
   },
@@ -374,7 +377,7 @@ export const teacherExamService = {
   async insertQuestion(examId: string, question: StoredQuestion, orderIndex: number): Promise<string> {
     const isEssay = question.type === 'essay' || question.question_type === 'essay';
     const { data, error } = await supabase
-      .from('questions')
+      .from('pertanyaan')
       .insert({
         exam_id: examId,
         question_type: isEssay ? 'essay' : 'multiple_choice',
@@ -407,7 +410,7 @@ export const teacherExamService = {
   async updateQuestion(question: StoredQuestion, orderIndex: number): Promise<void> {
     const isEssay = question.type === 'essay' || question.question_type === 'essay';
     const { error } = await supabase
-      .from('questions')
+      .from('pertanyaan')
       .update({
         question_type: isEssay ? 'essay' : 'multiple_choice',
         content: question.prompt,
@@ -429,7 +432,8 @@ export const teacherExamService = {
         },
         order_index: orderIndex,
       })
-      .eq('id', question.id);
+      .eq('id', question.id)
+      .is('deleted_date', null);
 
     if (error) throw error;
   },
@@ -466,18 +470,22 @@ export const teacherExamService = {
       };
     });
 
-    const { error } = await supabase.from('questions').insert(payload);
+    const { error } = await supabase.from('pertanyaan').insert(payload);
     if (error) throw error;
   },
 
   async deleteQuestion(questionId: string): Promise<void> {
-    const { error } = await supabase.from('questions').delete().eq('id', questionId);
+    const { error } = await supabase
+      .from('pertanyaan')
+      .update({ deleted_date: new Date().toISOString() })
+      .eq('id', questionId)
+      .is('deleted_date', null);
     if (error) throw error;
   },
 
   async updateAttemptScore(attemptId: string, score: number): Promise<void> {
     const { error } = await supabase
-      .from('exam_attempts')
+      .from('percobaan_ujian')
       .update({ score })
       .eq('id', attemptId);
     if (error) throw error;
@@ -489,7 +497,7 @@ export function mapMonitoringRowsToAttempts(
   exam: ExamConfig,
 ): ExamAttemptState[] {
   return (rows ?? []).map((row) => {
-    const profileObj = Array.isArray(row.profiles) ? row.profiles[0] : row.profiles;
+    const profileObj = Array.isArray(row.profil) ? row.profil[0] : row.profil;
     const fullName = profileObj?.full_name || 'Peserta Ujian';
     const rawViolations = Array.isArray(row.violation_logs) ? row.violation_logs : [];
     const violations: ViolationLog[] = rawViolations.map((v: any, idx: number) => ({

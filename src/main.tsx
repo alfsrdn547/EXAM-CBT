@@ -23,9 +23,10 @@ async function bootstrap() {
         <div className="max-w-lg rounded-2xl border border-red-200 bg-white p-6 shadow-sm">
           <h1 className="text-lg font-bold text-red-700">Aplikasi gagal dimuat</h1>
           <p className="mt-2 text-sm text-slate-600">
-            Konfigurasi Supabase tidak valid. Periksa <code>.env</code> dan pastikan
-            <code> VITE_SUPABASE_URL</code> berisi URL <code>https://...</code> serta
-            <code> VITE_SUPABASE_ANON_KEY</code> berisi publishable/anon key.
+            Konfigurasi Supabase tidak valid. Pastikan variabel <code>VITE_SUPABASE_URL</code>
+            atau <code>SUPABASE_URL</code> berisi URL <code>https://...</code>, serta
+            <code> VITE_SUPABASE_ANON_KEY</code> atau <code>SUPABASE_ANON_KEY</code>
+            berisi publishable/anon key.
           </p>
           <pre className="mt-4 whitespace-pre-wrap rounded-lg bg-slate-100 p-3 text-xs text-slate-700">
             {message}
